@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 
@@ -10,8 +11,32 @@ pub struct Options {
     pub line_regexp: bool,
     pub with_filename: bool,
     pub quiet: bool,
+    pub count: bool,
     pub max_count: Option<usize>,
 }
+
+#[derive(Debug)]
+pub enum ParseError {
+    NotEnoughArguments,
+    MissingMaxCountValue,
+    InvalidMaxCountValue(String),
+    UnknownArgument(String),
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseError::NotEnoughArguments => write!(f, "not enough arguments"),
+            ParseError::MissingMaxCountValue => write!(f, "missing value for max-count"),
+            ParseError::InvalidMaxCountValue(value) => {
+                write!(f, "invalid value for max-count: {value}")
+            }
+            ParseError::UnknownArgument(arg) => write!(f, "unknown argument: {arg}"),
+        }
+    }
+}
+
+impl Error for ParseError {}
 
 pub struct Config {
     query: String,
@@ -20,42 +45,9 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new(args: &[String]) -> Result<Config, &'static str> {
-        if args.len() < 3 {
-            return Err("not enough arguments");
-        }
-
-        let query = args[1].clone();
-        let filename = args[2].clone();
-
-        let mut options = Options::default();
-        let mut index = 3;
-
-        while index < args.len() {
-            let arg = &args[index];
-            index += 1;
-            match arg.as_str() {
-                "-i" | "-y" | "--ignore-case" => options.ignore_case = true,
-                "-n" | "--line-number" => options.line_number = true,
-                "-v" | "--invert-match" => options.invert_match = true,
-                "-x" | "--line-regexp" => options.line_regexp = true,
-                "-H" | "--with-filename" => options.with_filename = true,
-                "-h" | "--no-filename" => options.with_filename = false,
-                "-q" | "--quiet" | "--silent" => options.quiet = true,
-                "-m" | "--max-count" => {
-                    if index >= args.len() {
-                        return Err("missing value for max-count");
-                    }
-                    let count_str = &args[index];
-                    index += 1;
-                    match count_str.parse::<usize>() {
-                        Ok(count) => options.max_count = Some(count),
-                        Err(_) => return Err("invalid value for max-count"),
-                    }
-                }
-                _ => return Err("unknown argument"),
-            }
-        }
+    pub fn new(args: &[String]) -> Result<Config, ParseError> {
+        let (query, filename, option_args) = parse_positional(args)?;
+        let options = parse_options(option_args)?;
 
         Ok(Config {
             query,
@@ -65,6 +57,51 @@ impl Config {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct MatchLine<'a> {
+    pub line_no: usize,
+    pub text: &'a str,
+}
+
+fn parse_positional<'a>(args: &'a [String]) -> Result<(String, String, &'a [String]), ParseError> {
+    if args.len() < 3 {
+        return Err(ParseError::NotEnoughArguments);
+    }
+
+    Ok((args[1].clone(), args[2].clone(), &args[3..]))
+}
+
+fn parse_options(args: &[String]) -> Result<Options, ParseError> {
+    let mut options = Options::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = &args[index];
+        index += 1;
+        match arg.as_str() {
+            "-i" | "-y" | "--ignore-case" => options.ignore_case = true,
+            "-n" | "--line-number" => options.line_number = true,
+            "-v" | "--invert-match" => options.invert_match = true,
+            "-x" | "--line-regexp" => options.line_regexp = true,
+            "-H" | "--with-filename" => options.with_filename = true,
+            "-h" | "--no-filename" => options.with_filename = false,
+            "-q" | "--quiet" | "--silent" => options.quiet = true,
+            "-c" | "--count" => options.count = true,
+            "-m" | "--max-count" => {
+                let count_str = args.get(index).ok_or(ParseError::MissingMaxCountValue)?;
+                index += 1;
+                let count = count_str
+                    .parse::<usize>()
+                    .map_err(|_| ParseError::InvalidMaxCountValue(count_str.clone()))?;
+                options.max_count = Some(count);
+            }
+            _ => return Err(ParseError::UnknownArgument(arg.clone())),
+        }
+    }
+
+    Ok(options)
+}
+
 pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
     let mut f = File::open(config.filename.clone())?;
 
@@ -72,9 +109,19 @@ pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
     f.read_to_string(&mut contents)
         .expect("something went wrong reading the file");
 
-    let results = search(&contents, &config);
+    let matches = search(&contents, &config);
 
-    if results.is_empty() {
+    if config.options.count {
+        let count = matches.len();
+        if config.options.with_filename {
+            println!("{}:{}", config.filename, count);
+        } else {
+            println!("{}", count);
+        }
+        return Ok(count > 0);
+    }
+
+    if matches.is_empty() {
         return Ok(false);
     }
 
@@ -82,19 +129,32 @@ pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
         return Ok(true);
     }
 
-    for line in results {
-        println!("{}", line);
+    for matched in matches {
+        println!("{}", format_match_line(&config, &matched));
     }
 
     Ok(true)
 }
 
-pub fn search<'a>(contents: &'a str, config: &Config) -> Vec<String> {
+fn format_match_line(config: &Config, matched: &MatchLine<'_>) -> String {
+    let line = if config.options.line_number {
+        format!("{}:{}", matched.line_no, matched.text)
+    } else {
+        matched.text.to_string()
+    };
+
+    if config.options.with_filename {
+        format!("{}:{}", config.filename, line)
+    } else {
+        line
+    }
+}
+
+pub fn search<'a>(contents: &'a str, config: &Config) -> Vec<MatchLine<'a>> {
     let mut results = Vec::new();
     let query = &config.query;
 
     let ignore_case = config.options.ignore_case;
-    let line_number = config.options.line_number;
     let invert_match = config.options.invert_match;
     let line_regexp = config.options.line_regexp;
     let quiet = config.options.quiet;
@@ -125,19 +185,12 @@ pub fn search<'a>(contents: &'a str, config: &Config) -> Vec<String> {
     let mut count = 0;
     for (index, line) in contents.lines().enumerate() {
         if check_line(line) ^ invert_match {
-            let res = if line_number {
-                format!("{}:{}", index + 1, line)
-            } else {
-                format!("{}", line)
-            };
-            let res = if config.options.with_filename {
-                format!("{}:{}", config.filename, res)
-            } else {
-                res
-            };
-            results.push(res);
+            results.push(MatchLine {
+                line_no: index + 1,
+                text: line,
+            });
             count += 1;
-            if quiet || (max_count.is_some() && count >= max_count.unwrap()) {
+            if quiet || max_count.is_some_and(|max| count >= max) {
                 break;
             }
         }
@@ -159,7 +212,10 @@ Pick three.
 Duct tape.";
 
         assert_eq!(
-            vec!["safe, fast, productive."],
+            vec![MatchLine {
+                line_no: 2,
+                text: "safe, fast, productive.",
+            }],
             search(
                 contents,
                 &Config {
