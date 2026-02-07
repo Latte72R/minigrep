@@ -64,7 +64,7 @@ pub struct MatchLine<'a> {
 }
 
 fn parse_positional<'a>(args: &'a [String]) -> Result<(String, String, &'a [String]), ParseError> {
-    if args.len() < 3 {
+    if args.len() < 2 {
         return Err(ParseError::NotEnoughArguments);
     }
 
@@ -78,28 +78,88 @@ fn parse_options(args: &[String]) -> Result<Options, ParseError> {
     while index < args.len() {
         let arg = &args[index];
         index += 1;
-        match arg.as_str() {
-            "-i" | "-y" | "--ignore-case" => options.ignore_case = true,
-            "-n" | "--line-number" => options.line_number = true,
-            "-v" | "--invert-match" => options.invert_match = true,
-            "-x" | "--line-regexp" => options.line_regexp = true,
-            "-H" | "--with-filename" => options.with_filename = true,
-            "-h" | "--no-filename" => options.with_filename = false,
-            "-q" | "--quiet" | "--silent" => options.quiet = true,
-            "-c" | "--count" => options.count = true,
-            "-m" | "--max-count" => {
-                let count_str = args.get(index).ok_or(ParseError::MissingMaxCountValue)?;
-                index += 1;
-                let count = count_str
-                    .parse::<usize>()
-                    .map_err(|_| ParseError::InvalidMaxCountValue(count_str.clone()))?;
-                options.max_count = Some(count);
-            }
-            _ => return Err(ParseError::UnknownArgument(arg.clone())),
+        if arg.starts_with("--") {
+            parse_long_option(arg, &mut options, args, &mut index)?;
+        } else if arg.starts_with('-') {
+            parse_short_option(arg, &mut options, args, &mut index)?;
+        } else {
+            return Err(ParseError::UnknownArgument(arg.clone()));
         }
     }
 
     Ok(options)
+}
+
+fn parse_long_option(
+    arg: &str,
+    options: &mut Options,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), ParseError> {
+    match arg {
+        "--ignore-case" => options.ignore_case = true,
+        "--line-number" => options.line_number = true,
+        "--invert-match" => options.invert_match = true,
+        "--line-regexp" => options.line_regexp = true,
+        "--with-filename" => options.with_filename = true,
+        "--no-filename" => options.with_filename = false,
+        "--quiet" | "--silent" => options.quiet = true,
+        "--count" => options.count = true,
+        "--max-count" => {
+            let count_str = args.get(*index).ok_or(ParseError::MissingMaxCountValue)?;
+            *index += 1;
+            let count = count_str
+                .parse::<usize>()
+                .map_err(|_| ParseError::InvalidMaxCountValue(count_str.clone()))?;
+            options.max_count = Some(count);
+        }
+        _ => return Err(ParseError::UnknownArgument(arg.to_string())),
+    }
+    Ok(())
+}
+
+fn parse_short_option(
+    arg: &str,
+    options: &mut Options,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), ParseError> {
+    let chars: Vec<char> = arg.chars().collect();
+    let mut char_index = 1;
+    while char_index < chars.len() {
+        let c = chars[char_index];
+        char_index += 1;
+
+        match c {
+            'i' | 'y' => options.ignore_case = true,
+            'n' => options.line_number = true,
+            'v' => options.invert_match = true,
+            'x' => options.line_regexp = true,
+            'H' => options.with_filename = true,
+            'h' => options.with_filename = false,
+            'q' => options.quiet = true,
+            'c' => options.count = true,
+            'm' => {
+                let count_str = if char_index < chars.len() {
+                    let s: String = chars[char_index..].iter().collect();
+                    char_index = chars.len();
+                    s
+                } else {
+                    let s = args.get(*index).ok_or(ParseError::MissingMaxCountValue)?;
+                    *index += 1;
+                    s.clone()
+                };
+
+                let count = count_str
+                    .parse::<usize>()
+                    .map_err(|_| ParseError::InvalidMaxCountValue(count_str.clone()))?;
+
+                options.max_count = Some(count);
+            }
+            _ => return Err(ParseError::UnknownArgument(format!("-{}", c))),
+        }
+    }
+    Ok(())
 }
 
 pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
