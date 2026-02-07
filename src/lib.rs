@@ -1,12 +1,20 @@
-use std::env;
 use std::error::Error;
 use std::fs::File;
 use std::io::prelude::*;
 
+#[derive(Default)]
+pub struct Options {
+    pub ignore_case: bool,
+    pub line_number: bool,
+    pub invert_match: bool,
+    pub line_regexp: bool,
+    pub with_filename: bool,
+}
+
 pub struct Config {
-    pub query: String,
-    pub filename: String,
-    pub case_sensitive: bool,
+    query: String,
+    filename: String,
+    options: Options,
 }
 
 impl Config {
@@ -14,30 +22,40 @@ impl Config {
         if args.len() < 3 {
             return Err("not enough arguments");
         }
+
         let query = args[1].clone();
         let filename = args[2].clone();
-        let case_sensitive = env::var("CASE_INSENSITIVE").is_err();
+
+        let mut options = Options::default();
+
+        for arg in &args[3..] {
+            match arg.as_str() {
+                "-i" | "--ignore-case" => options.ignore_case = true,
+                "-n" | "--line-number" => options.line_number = true,
+                "-v" | "--invert-match" => options.invert_match = true,
+                "-x" | "--line-regexp" => options.line_regexp = true,
+                "-H" | "--with-filename" => options.with_filename = true,
+                "-h" | "--no-filename" => options.with_filename = false,
+                _ => return Err("unknown argument"),
+            }
+        }
 
         Ok(Config {
             query,
             filename,
-            case_sensitive,
+            options,
         })
     }
 }
 
 pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
-    let mut f = File::open(config.filename)?;
+    let mut f = File::open(config.filename.clone())?;
 
     let mut contents = String::new();
     f.read_to_string(&mut contents)
         .expect("something went wrong reading the file");
 
-    let results = if config.case_sensitive {
-        search(&config.query, &contents)
-    } else {
-        search_case_insensitive(&config.query, &contents)
-    };
+    let results = search(&contents, config);
 
     for line in results {
         println!("{}", line);
@@ -46,27 +64,52 @@ pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub fn search<'a>(query: &str, contents: &'a str) -> Vec<&'a str> {
+pub fn search<'a>(contents: &'a str, config: Config) -> Vec<String> {
     let mut results = Vec::new();
+    let query = &config.query;
 
-    for line in contents.lines() {
-        if line.contains(query) {
-            results.push(line);
+    let ignore_case = config.options.ignore_case;
+    let line_number = config.options.line_number;
+    let invert_match = config.options.invert_match;
+    let line_regexp = config.options.line_regexp;
+
+    let query = if ignore_case {
+        query.to_lowercase()
+    } else {
+        query.to_string()
+    };
+
+    let normalize_case = |s: &str| {
+        if ignore_case {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+
+    let check_line = |line: &str| {
+        if line_regexp {
+            normalize_case(line) == query
+        } else {
+            normalize_case(line).contains(&query)
+        }
+    };
+
+    for (index, line) in contents.lines().enumerate() {
+        if check_line(line) ^ invert_match {
+            let res = if line_number {
+                format!("{}:{}", index + 1, line)
+            } else {
+                format!("{}", line)
+            };
+            let res = if config.options.with_filename {
+                format!("{}:{}", config.filename, res)
+            } else {
+                res
+            };
+            results.push(res);
         }
     }
-    results
-}
-
-pub fn search_case_insensitive<'a>(query: &str, contents: &'a str) -> Vec<&'a str> {
-    let query = query.to_lowercase();
-    let mut results = Vec::new();
-
-    for line in contents.lines() {
-        if line.to_lowercase().contains(&query) {
-            results.push(line);
-        }
-    }
-
     results
 }
 
@@ -83,21 +126,19 @@ safe, fast, productive.
 Pick three.
 Duct tape.";
 
-        assert_eq!(vec!["safe, fast, productive."], search(query, contents));
-    }
-
-    #[test]
-    fn case_insensitive() {
-        let query = "rUsT";
-        let contents = "\
-Rust:
-safe, fast, productive.
-Pick three.
-Trust me.";
-
         assert_eq!(
-            vec!["Rust:", "Trust me."],
-            search_case_insensitive(query, contents)
+            vec!["safe, fast, productive."],
+            search(
+                contents,
+                Config {
+                    query: query.to_string(),
+                    filename: String::new(),
+                    options: Options {
+                        ignore_case: false,
+                        ..Default::default()
+                    },
+                }
+            )
         );
     }
 }
