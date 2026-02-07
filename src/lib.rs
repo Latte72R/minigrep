@@ -9,6 +9,8 @@ pub struct Options {
     pub invert_match: bool,
     pub line_regexp: bool,
     pub with_filename: bool,
+    pub quiet: bool,
+    pub max_count: Option<usize>,
 }
 
 pub struct Config {
@@ -27,15 +29,30 @@ impl Config {
         let filename = args[2].clone();
 
         let mut options = Options::default();
+        let mut index = 3;
 
-        for arg in &args[3..] {
+        while index < args.len() {
+            let arg = &args[index];
+            index += 1;
             match arg.as_str() {
-                "-i" | "--ignore-case" => options.ignore_case = true,
+                "-i" | "-y" | "--ignore-case" => options.ignore_case = true,
                 "-n" | "--line-number" => options.line_number = true,
                 "-v" | "--invert-match" => options.invert_match = true,
                 "-x" | "--line-regexp" => options.line_regexp = true,
                 "-H" | "--with-filename" => options.with_filename = true,
                 "-h" | "--no-filename" => options.with_filename = false,
+                "-q" | "--quiet" | "--silent" => options.quiet = true,
+                "-m" | "--max-count" => {
+                    if index >= args.len() {
+                        return Err("missing value for max-count");
+                    }
+                    let count_str = &args[index];
+                    index += 1;
+                    match count_str.parse::<usize>() {
+                        Ok(count) => options.max_count = Some(count),
+                        Err(_) => return Err("invalid value for max-count"),
+                    }
+                }
                 _ => return Err("unknown argument"),
             }
         }
@@ -48,23 +65,31 @@ impl Config {
     }
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn Error>> {
+pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
     let mut f = File::open(config.filename.clone())?;
 
     let mut contents = String::new();
     f.read_to_string(&mut contents)
         .expect("something went wrong reading the file");
 
-    let results = search(&contents, config);
+    let results = search(&contents, &config);
+
+    if results.is_empty() {
+        return Ok(false);
+    }
+
+    if config.options.quiet {
+        return Ok(true);
+    }
 
     for line in results {
         println!("{}", line);
     }
 
-    Ok(())
+    Ok(true)
 }
 
-pub fn search<'a>(contents: &'a str, config: Config) -> Vec<String> {
+pub fn search<'a>(contents: &'a str, config: &Config) -> Vec<String> {
     let mut results = Vec::new();
     let query = &config.query;
 
@@ -72,6 +97,8 @@ pub fn search<'a>(contents: &'a str, config: Config) -> Vec<String> {
     let line_number = config.options.line_number;
     let invert_match = config.options.invert_match;
     let line_regexp = config.options.line_regexp;
+    let quiet = config.options.quiet;
+    let max_count = config.options.max_count;
 
     let query = if ignore_case {
         query.to_lowercase()
@@ -95,6 +122,7 @@ pub fn search<'a>(contents: &'a str, config: Config) -> Vec<String> {
         }
     };
 
+    let mut count = 0;
     for (index, line) in contents.lines().enumerate() {
         if check_line(line) ^ invert_match {
             let res = if line_number {
@@ -108,6 +136,10 @@ pub fn search<'a>(contents: &'a str, config: Config) -> Vec<String> {
                 res
             };
             results.push(res);
+            count += 1;
+            if quiet || (max_count.is_some() && count >= max_count.unwrap()) {
+                break;
+            }
         }
     }
     results
@@ -130,7 +162,7 @@ Duct tape.";
             vec!["safe, fast, productive."],
             search(
                 contents,
-                Config {
+                &Config {
                     query: query.to_string(),
                     filename: String::new(),
                     options: Options {
