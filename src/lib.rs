@@ -9,7 +9,7 @@ pub struct Options {
     pub line_number: bool,
     pub invert_match: bool,
     pub line_regexp: bool,
-    pub with_filename: bool,
+    pub with_filename: Option<bool>,
     pub quiet: bool,
     pub count: bool,
     pub max_count: Option<usize>,
@@ -40,18 +40,17 @@ impl Error for ParseError {}
 
 pub struct Config {
     query: String,
-    filename: String,
+    filenames: Vec<String>,
     options: Options,
 }
 
 impl Config {
     pub fn new(args: &[String]) -> Result<Config, ParseError> {
-        let (query, filename, option_args) = parse_positional(args)?;
-        let options = parse_options(option_args)?;
+        let (query, filenames, options) = parse_args(args)?;
 
         Ok(Config {
             query,
-            filename,
+            filenames,
             options,
         })
     }
@@ -63,31 +62,31 @@ pub struct MatchLine<'a> {
     pub text: &'a str,
 }
 
-fn parse_positional<'a>(args: &'a [String]) -> Result<(String, String, &'a [String]), ParseError> {
-    if args.len() < 2 {
-        return Err(ParseError::NotEnoughArguments);
-    }
-
-    Ok((args[1].clone(), args[2].clone(), &args[3..]))
-}
-
-fn parse_options(args: &[String]) -> Result<Options, ParseError> {
+fn parse_args(args: &[String]) -> Result<(String, Vec<String>, Options), ParseError> {
     let mut options = Options::default();
-    let mut index = 0;
+    let mut positionals = Vec::new();
+    let mut index = 1;
 
     while index < args.len() {
         let arg = &args[index];
         index += 1;
+
         if arg.starts_with("--") {
             parse_long_option(arg, &mut options, args, &mut index)?;
         } else if arg.starts_with('-') {
             parse_short_option(arg, &mut options, args, &mut index)?;
         } else {
-            return Err(ParseError::UnknownArgument(arg.clone()));
+            positionals.push(arg.clone());
         }
     }
 
-    Ok(options)
+    if positionals.len() < 2 {
+        return Err(ParseError::NotEnoughArguments);
+    }
+
+    let query = positionals[0].clone();
+    let filenames = positionals[1..].to_vec();
+    Ok((query, filenames, options))
 }
 
 fn parse_long_option(
@@ -101,8 +100,8 @@ fn parse_long_option(
         "--line-number" => options.line_number = true,
         "--invert-match" => options.invert_match = true,
         "--line-regexp" => options.line_regexp = true,
-        "--with-filename" => options.with_filename = true,
-        "--no-filename" => options.with_filename = false,
+        "--with-filename" => options.with_filename = Some(true),
+        "--no-filename" => options.with_filename = Some(false),
         "--quiet" | "--silent" => options.quiet = true,
         "--count" => options.count = true,
         "--max-count" => {
@@ -135,8 +134,8 @@ fn parse_short_option(
             'n' => options.line_number = true,
             'v' => options.invert_match = true,
             'x' => options.line_regexp = true,
-            'H' => options.with_filename = true,
-            'h' => options.with_filename = false,
+            'H' => options.with_filename = Some(true),
+            'h' => options.with_filename = Some(false),
             'q' => options.quiet = true,
             'c' => options.count = true,
             'm' => {
@@ -163,48 +162,65 @@ fn parse_short_option(
 }
 
 pub fn run(config: Config) -> Result<bool, Box<dyn Error>> {
-    let mut f = File::open(config.filename.clone())?;
+    let with_filename = config
+        .options
+        .with_filename
+        .unwrap_or(config.filenames.len() > 1);
+    let mut found = false;
 
-    let mut contents = String::new();
-    f.read_to_string(&mut contents)
-        .expect("something went wrong reading the file");
+    for filename in &config.filenames {
+        let mut f = File::open(filename)?;
+        let mut contents = String::new();
+        f.read_to_string(&mut contents)
+            .expect("something went wrong reading the file");
 
-    let matches = search(&contents, &config);
+        let matches = search(&contents, &config);
 
-    if config.options.count {
-        let count = matches.len();
-        if config.options.with_filename {
-            println!("{}:{}", config.filename, count);
-        } else {
-            println!("{}", count);
+        if config.options.count {
+            let count = matches.len();
+            if with_filename {
+                println!("{}:{}", filename, count);
+            } else {
+                println!("{}", count);
+            }
+            found = found || count > 0;
+            continue;
         }
-        return Ok(count > 0);
+
+        if matches.is_empty() {
+            continue;
+        }
+        found = true;
+
+        if config.options.quiet {
+            return Ok(true);
+        }
+
+        for matched in matches {
+            println!(
+                "{}",
+                format_match_line(filename, with_filename, &config, &matched)
+            );
+        }
     }
 
-    if matches.is_empty() {
-        return Ok(false);
-    }
-
-    if config.options.quiet {
-        return Ok(true);
-    }
-
-    for matched in matches {
-        println!("{}", format_match_line(&config, &matched));
-    }
-
-    Ok(true)
+    Ok(found)
 }
 
-fn format_match_line(config: &Config, matched: &MatchLine<'_>) -> String {
+fn format_match_line(
+    filename: &str,
+    with_filename: bool,
+    config: &Config,
+    matched: &MatchLine<'_>,
+) -> String {
     let line = if config.options.line_number {
         format!("{}:{}", matched.line_no, matched.text)
     } else {
         matched.text.to_string()
     };
 
-    if config.options.with_filename {
-        format!("{}:{}", config.filename, line)
+    if with_filename {
+        format!("{}:{}", filename, line)
     } else {
         line
     }
@@ -280,13 +296,91 @@ Duct tape.";
                 contents,
                 &Config {
                     query: query.to_string(),
-                    filename: String::new(),
+                    filenames: Vec::new(),
                     options: Options {
                         ignore_case: false,
                         ..Default::default()
                     },
                 }
             )
+        );
+    }
+
+    #[test]
+    fn parse_config_with_options_before_positionals() {
+        let args = vec![
+            "minigrep".to_string(),
+            "-i".to_string(),
+            "duct".to_string(),
+            "poem.txt".to_string(),
+        ];
+
+        let config = Config::new(&args).expect("failed to parse args");
+        assert_eq!("duct", config.query);
+        assert_eq!(vec!["poem.txt".to_string()], config.filenames);
+        assert!(config.options.ignore_case);
+    }
+
+    #[test]
+    fn parse_config_with_options_between_positionals() {
+        let args = vec![
+            "minigrep".to_string(),
+            "duct".to_string(),
+            "-i".to_string(),
+            "poem.txt".to_string(),
+        ];
+
+        let config = Config::new(&args).expect("failed to parse args");
+        assert_eq!("duct", config.query);
+        assert_eq!(vec!["poem.txt".to_string()], config.filenames);
+        assert!(config.options.ignore_case);
+    }
+
+    #[test]
+    fn parse_config_with_options_after_positionals() {
+        let args = vec![
+            "minigrep".to_string(),
+            "duct".to_string(),
+            "poem.txt".to_string(),
+            "-i".to_string(),
+        ];
+
+        let config = Config::new(&args).expect("failed to parse args");
+        assert_eq!("duct", config.query);
+        assert_eq!(vec!["poem.txt".to_string()], config.filenames);
+        assert!(config.options.ignore_case);
+    }
+
+    #[test]
+    fn parse_config_rejects_double_dash() {
+        let args = vec![
+            "minigrep".to_string(),
+            "--".to_string(),
+            "-i".to_string(),
+            "poem.txt".to_string(),
+        ];
+
+        match Config::new(&args) {
+            Err(ParseError::UnknownArgument(arg)) => assert_eq!("--", arg),
+            Err(other) => panic!("unexpected parse error: {other}"),
+            Ok(_) => panic!("expected parse to fail"),
+        }
+    }
+
+    #[test]
+    fn parse_config_with_multiple_files() {
+        let args = vec![
+            "minigrep".to_string(),
+            "duct".to_string(),
+            "poem.txt".to_string(),
+            "more.txt".to_string(),
+        ];
+
+        let config = Config::new(&args).expect("failed to parse args");
+        assert_eq!("duct", config.query);
+        assert_eq!(
+            vec!["poem.txt".to_string(), "more.txt".to_string()],
+            config.filenames
         );
     }
 }
