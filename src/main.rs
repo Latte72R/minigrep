@@ -1,4 +1,3 @@
-extern crate minigrep;
 use minigrep::Config;
 use std::env;
 use std::process;
